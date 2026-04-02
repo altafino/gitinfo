@@ -283,8 +283,7 @@ func FilesTouchedByUser(user, branch string, days int) ([]FileChange, error) {
 // CommitsForFile returns detailed commit information for a specific file and user.
 func CommitsForFile(user, file, branch string, days int) ([]CommitInfo, error) {
 	since := sinceFlag(days)
-	user = strings.ToLower(user)
-
+	// --author uses a case-sensitive regexp; keep the same casing as %an in commits.
 	args := []string{"log", "--format=%H|%an|%ad|%s%n%b%nENC_COMMIT_END", "--date=short", "--author=" + user, "--no-merges"}
 	if branch != "" {
 		args = append(args, branch)
