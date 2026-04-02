@@ -27,6 +27,15 @@ type FileChange struct {
 	Changes int
 }
 
+// CommitInfo holds information about a single git commit.
+type CommitInfo struct {
+	Hash    string
+	Author  string
+	Date    string
+	Subject string
+	Body    string
+}
+
 // runGit runs a git command in the current working directory and returns its output.
 func runGit(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
@@ -269,4 +278,61 @@ func FilesTouchedByUser(user, branch string, days int) ([]FileChange, error) {
 		return result[i].File < result[j].File
 	})
 	return result, nil
+}
+
+// CommitsForFile returns detailed commit information for a specific file and user.
+func CommitsForFile(user, file, branch string, days int) ([]CommitInfo, error) {
+	since := sinceFlag(days)
+	user = strings.ToLower(user)
+
+	args := []string{"log", "--format=%H|%an|%ad|%s%n%b%nENC_COMMIT_END", "--date=short", "--author=" + user, "--no-merges"}
+	if branch != "" {
+		args = append(args, branch)
+	} else {
+		args = append(args, "--all")
+	}
+	if since != "" {
+		args = append(args, since)
+	}
+	args = append(args, "--", file)
+
+	out, err := runGit(args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseCommitsLogOutput(out), nil
+}
+
+// parseCommitsLogOutput parses git log output delimited by ENC_COMMIT_END markers.
+func parseCommitsLogOutput(out string) []CommitInfo {
+	var commits []CommitInfo
+	chunks := strings.Split(out, "ENC_COMMIT_END")
+	for _, chunk := range chunks {
+		chunk = strings.TrimSpace(chunk)
+		if chunk == "" {
+			continue
+		}
+
+		lines := strings.SplitN(chunk, "\n", 2)
+		header := lines[0]
+		body := ""
+		if len(lines) > 1 {
+			body = strings.TrimSpace(lines[1])
+		}
+
+		parts := strings.SplitN(header, "|", 4)
+		if len(parts) < 4 {
+			continue
+		}
+
+		commits = append(commits, CommitInfo{
+			Hash:    parts[0],
+			Author:  parts[1],
+			Date:    parts[2],
+			Subject: parts[3],
+			Body:    body,
+		})
+	}
+	return commits
 }

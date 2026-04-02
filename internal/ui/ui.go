@@ -57,6 +57,19 @@ var (
 
 	countStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
+
+	hashStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
+
+	dateStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("141"))
+
+	subjectStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("212")).
+			Bold(true)
+
+	bodyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252"))
 )
 
 // ─── View identifiers ────────────────────────────────────────────────────────
@@ -72,6 +85,7 @@ const (
 	viewUserFiles
 	viewUserFilesUserSelect
 	viewUserFilesInput
+	viewFileCommits
 )
 
 // ─── Menu item ───────────────────────────────────────────────────────────────
@@ -89,6 +103,7 @@ func (m menuItem) FilterValue() string { return m.title }
 type branchUsersMsg []git.BranchInfo
 type userBranchesMsg []string
 type userFilesMsg []git.FileChange
+type fileCommitsMsg []git.CommitInfo
 type gitUsersMsg []git.BranchUser
 type errMsg struct{ err error }
 
@@ -180,6 +195,12 @@ type Model struct {
 	ufForm   inputForm
 	ufFiles  []git.FileChange
 	ufScroll int
+	ufCursor int
+
+	// file-commits view
+	fcCommits    []git.CommitInfo
+	fcScroll     int
+	selectedFile string
 
 	// user selection (shared by user-branches and user-files flows)
 	pendingView  viewID
@@ -273,6 +294,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.view == viewMenu {
 				return m, tea.Quit
 			}
+			if m.view == viewFileCommits {
+				m.view = viewUserFiles
+				return m, nil
+			}
 			// Go back to menu from any sub-view
 			m.view = viewMenu
 			m.err = nil
@@ -283,6 +308,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case viewBranchUsers, viewUserBranches, viewUserFiles:
 				m.view = viewMenu
 				m.err = nil
+				return m, nil
+			case viewFileCommits:
+				m.view = viewUserFiles
 				return m, nil
 			case viewUserBranchesInput:
 				m.view = viewUserBranchesUserSelect
@@ -300,6 +328,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.submitUserBranchesForm()
 			case viewUserFilesInput:
 				return m.submitUserFilesForm()
+			case viewUserFiles:
+				return m.handleFileSelect()
 			}
 
 		case "tab":
@@ -320,8 +350,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case viewUserFiles:
-				if m.ufScroll > 0 {
-					m.ufScroll--
+				if m.ufCursor > 0 {
+					m.ufCursor--
+					m.syncUserFilesScroll()
+				}
+				return m, nil
+			case viewFileCommits:
+				if m.fcScroll > 0 {
+					m.fcScroll--
 				}
 				return m, nil
 			}
@@ -331,7 +367,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.buScroll++
 				return m, nil
 			case viewUserFiles:
-				m.ufScroll++
+				if m.ufCursor < len(m.ufFiles)-1 {
+					m.ufCursor++
+					m.syncUserFilesScroll()
+				}
+				return m, nil
+			case viewFileCommits:
+				m.fcScroll++
 				return m, nil
 			}
 		}
@@ -360,7 +402,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.ufFiles = []git.FileChange(msg)
 		m.ufScroll = 0
+		m.ufCursor = 0
 		m.view = viewUserFiles
+		return m, nil
+
+	case fileCommitsMsg:
+		m.loading = false
+		m.fcCommits = []git.CommitInfo(msg)
+		m.fcScroll = 0
+		m.view = viewFileCommits
 		return m, nil
 
 	case gitUsersMsg:
@@ -474,6 +524,22 @@ func (m Model) submitUserFilesForm() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.spinner.Tick, loadUserFiles(user, branch, days))
 }
 
+func (m Model) handleFileSelect() (tea.Model, tea.Cmd) {
+	if len(m.ufFiles) == 0 {
+		return m, nil
+	}
+	file := m.ufFiles[m.ufCursor].File
+	m.selectedFile = file
+	m.loading = true
+
+	// To load commits, we need the user, branch, and days from the form
+	user := m.selectedUser.Name
+	branch := strings.TrimSpace(m.ufForm.value(0))
+	days := parseDays(m.ufForm.value(1))
+
+	return m, tea.Batch(m.spinner.Tick, loadFileCommits(user, file, branch, days))
+}
+
 // parseDays parses a string as a positive integer; returns 0 on failure.
 func parseDays(s string) int {
 	s = strings.TrimSpace(s)
@@ -485,6 +551,34 @@ func parseDays(s string) int {
 		return 0
 	}
 	return n
+}
+
+// syncUserFilesScroll keeps the file list window scrolled so the cursor stays visible.
+func (m *Model) syncUserFilesScroll() {
+	maxLines := m.height - 6
+	if maxLines < 1 {
+		maxLines = 20
+	}
+	total := len(m.ufFiles)
+	if total == 0 {
+		return
+	}
+	if total <= maxLines {
+		m.ufScroll = 0
+		return
+	}
+	if m.ufCursor < m.ufScroll {
+		m.ufScroll = m.ufCursor
+	}
+	if m.ufCursor >= m.ufScroll+maxLines {
+		m.ufScroll = m.ufCursor - maxLines + 1
+	}
+	if m.ufScroll > total-maxLines {
+		m.ufScroll = total - maxLines
+	}
+	if m.ufScroll < 0 {
+		m.ufScroll = 0
+	}
 }
 
 // ─── Async commands ──────────────────────────────────────────────────────────
@@ -529,6 +623,16 @@ func loadUserFiles(user, branch string, days int) tea.Cmd {
 	}
 }
 
+func loadFileCommits(user, file, branch string, days int) tea.Cmd {
+	return func() tea.Msg {
+		commits, err := git.CommitsForFile(user, file, branch, days)
+		if err != nil {
+			return errMsg{err}
+		}
+		return fileCommitsMsg(commits)
+	}
+}
+
 // ─── View ────────────────────────────────────────────────────────────────────
 
 func (m Model) View() string {
@@ -557,6 +661,8 @@ func (m Model) View() string {
 		return m.userFilesInputView()
 	case viewUserFiles:
 		return m.userFilesView()
+	case viewFileCommits:
+		return m.fileCommitsView()
 	}
 	return ""
 }
@@ -716,8 +822,20 @@ func (m Model) userFilesView() string {
 		}
 
 		b.WriteString(countStyle.Render(fmt.Sprintf("  Found %d file(s):\n\n", total)))
-		for _, fc := range m.ufFiles[scroll:end] {
-			b.WriteString(fileStyle.Render(fmt.Sprintf("  • %-60s", fc.File)))
+		for i, fc := range m.ufFiles {
+			// Windowing the list
+			if i < scroll || i >= end {
+				continue
+			}
+
+			cursor := "  "
+			style := fileStyle
+			if i == m.ufCursor {
+				cursor = "> "
+				style = selectedStyle
+			}
+
+			b.WriteString(style.Render(fmt.Sprintf("%s%-60s", cursor, fc.File)))
 			b.WriteString(countStyle.Render(fmt.Sprintf(" %d commit(s)", fc.Changes)))
 			b.WriteString("\n")
 		}
@@ -730,6 +848,79 @@ func (m Model) userFilesView() string {
 		}
 	}
 
-	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll  •  esc/q back"))
+	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll  •  enter select  •  esc/q back"))
+	return b.String()
+}
+
+func (m Model) fileCommitsView() string {
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(titleStyle.Render("  Commit History"))
+	b.WriteString("\n")
+	b.WriteString(fileStyle.Render(fmt.Sprintf("  File: %s", m.selectedFile)))
+	b.WriteString("\n")
+	b.WriteString(userStyle.Render(fmt.Sprintf("  User: %s <%s>", m.selectedUser.Name, m.selectedUser.Email)))
+	b.WriteString("\n\n")
+
+	if len(m.fcCommits) == 0 {
+		b.WriteString(subtitleStyle.Render("  No commits found for this file/user."))
+		b.WriteString("\n")
+	} else {
+		// Calculate visible lines
+		maxLines := m.height - 8
+		if maxLines < 1 {
+			maxLines = 20
+		}
+
+		var lines []string
+		for _, c := range m.fcCommits {
+			shortHash := c.Hash
+			if len(shortHash) > 7 {
+				shortHash = shortHash[:7]
+			}
+			lines = append(lines, hashStyle.Render(fmt.Sprintf("  %s  ", shortHash))+
+				dateStyle.Render(c.Date)+
+				"  "+
+				userStyle.Render(c.Author))
+			lines = append(lines, "  "+subjectStyle.Render(c.Subject))
+			if c.Body != "" {
+				bodyLines := strings.Split(c.Body, "\n")
+				for _, bl := range bodyLines {
+					bl = strings.TrimSpace(bl)
+					if bl != "" {
+						lines = append(lines, bodyStyle.Render(fmt.Sprintf("    %s", bl)))
+					}
+				}
+			}
+			lines = append(lines, "") // spacer between commits
+		}
+
+		total := len(lines)
+		scroll := m.fcScroll
+		if scroll > total-maxLines {
+			scroll = total - maxLines
+		}
+		if scroll < 0 {
+			scroll = 0
+		}
+		end := scroll + maxLines
+		if end > total {
+			end = total
+		}
+
+		for _, l := range lines[scroll:end] {
+			b.WriteString(l)
+			b.WriteString("\n")
+		}
+
+		if total > maxLines {
+			b.WriteString(countStyle.Render(fmt.Sprintf(
+				"  (scrolled %d/%d lines)", end, total,
+			)))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll  •  esc/q back to list"))
 	return b.String()
 }
