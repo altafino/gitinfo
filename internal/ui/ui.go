@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/altafino/gitinfo/internal/git"
 )
@@ -983,9 +984,11 @@ func (m Model) userBranchesView() string {
 		b.WriteString(subtitleStyle.Render("  No branches found for this user."))
 		b.WriteString("\n")
 	} else {
-		b.WriteString(countStyle.Render(fmt.Sprintf("  Found %d branch(es):\n\n", len(m.ubBranches))))
+		b.WriteString(countStyle.Render(fmt.Sprintf("  Found %d branch(es):", len(m.ubBranches))))
+		b.WriteString("\n")
 		for _, br := range m.ubBranches {
-			b.WriteString(branchStyle.Render(fmt.Sprintf("  • %s", br)))
+			b.WriteString("  • ")
+			b.WriteString(branchStyle.Render(br))
 			b.WriteString("\n")
 		}
 	}
@@ -1034,7 +1037,10 @@ func (m Model) userFilesView() string {
 			end = total
 		}
 
-		b.WriteString(countStyle.Render(fmt.Sprintf("  Found %d file(s):\n\n", total)))
+		b.WriteString(countStyle.Render(fmt.Sprintf("  Found %d file(s):", total)))
+		b.WriteString("\n")
+
+		fileColW := userFilesNameColumnWidth(m.width)
 		for i, fc := range m.ufFiles {
 			// Windowing the list
 			if i < scroll || i >= end {
@@ -1048,7 +1054,8 @@ func (m Model) userFilesView() string {
 				style = selectedStyle
 			}
 
-			b.WriteString(style.Render(fmt.Sprintf("%s%-60s", cursor, fc.File)))
+			nameCol := padFileNameColumn(fc.File, fileColW)
+			b.WriteString(style.Render(cursor + nameCol))
 			b.WriteString(countStyle.Render(fmt.Sprintf(" %d commit(s)", fc.Changes)))
 			b.WriteString("\n")
 		}
@@ -1274,6 +1281,33 @@ func shortISO(iso string) string {
 		return iso
 	}
 	return t.Format("2006-01-02 15:04")
+}
+
+// userFilesNameColumnWidth is the display width for filenames (cursor is separate).
+func userFilesNameColumnWidth(termWidth int) int {
+	const minW = 24
+	const maxW = 72
+	w := 56
+	if termWidth > 40 {
+		w = termWidth - 22
+	}
+	switch {
+	case w < minW:
+		return minW
+	case w > maxW:
+		return maxW
+	default:
+		return w
+	}
+}
+
+// padFileNameColumn pads or truncates a path to a fixed terminal display width.
+func padFileNameColumn(name string, colW int) string {
+	w := runewidth.StringWidth(name)
+	if w >= colW {
+		return runewidth.Truncate(name, colW, "…")
+	}
+	return name + strings.Repeat(" ", colW-w)
 }
 
 func truncateRunes(s string, max int) string {

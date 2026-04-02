@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/altafino/gitinfo/internal/git"
+	"github.com/mattn/go-runewidth"
 )
 
 func TestParseDays(t *testing.T) {
@@ -112,6 +113,16 @@ func TestBuildBranchUsersLines(t *testing.T) {
 	}
 
 	_ = from
+}
+
+func TestPadFileNameColumn(t *testing.T) {
+	if got := padFileNameColumn("a.go", 8); runewidth.StringWidth(got) != 8 {
+		t.Errorf("width = %d, want 8: %q", runewidth.StringWidth(got), got)
+	}
+	long := strings.Repeat("x", 100)
+	if w := runewidth.StringWidth(padFileNameColumn(long, 10)); w != 10 {
+		t.Errorf("truncated width = %d, want 10", w)
+	}
 }
 
 func TestBuildBranchUsersSelection(t *testing.T) {
