@@ -3,6 +3,8 @@ package ui
 import (
 	"strings"
 	"testing"
+
+	"github.com/altafino/gitinfo/internal/git"
 )
 
 func TestParseDays(t *testing.T) {
@@ -110,4 +112,21 @@ func TestBuildBranchUsersLines(t *testing.T) {
 	}
 
 	_ = from
+}
+
+func TestBuildBranchUsersSelection(t *testing.T) {
+	infos := []git.BranchInfo{
+		{Branch: "main", Users: []git.BranchUser{{Name: "A", Email: "a@x"}}},
+		{Branch: "dev", Users: []git.BranchUser{}},
+	}
+	users, lines, total := buildBranchUsersSelection(infos)
+	if total != 4 {
+		t.Errorf("total lines = %d, want 4", total)
+	}
+	if len(users) != 1 || len(lines) != 1 {
+		t.Fatalf("users/lines = %d/%d", len(users), len(lines))
+	}
+	if users[0].Name != "A" || lines[0] != 1 {
+		t.Errorf("first user line = %d, want 1", lines[0])
+	}
 }
