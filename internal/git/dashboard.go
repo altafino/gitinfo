@@ -1,7 +1,9 @@
 package git
 
 import (
+	"bufio"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -63,6 +65,11 @@ func UserDashboardStats(u BranchUser, days int) (*UserDashboard, error) {
 	since := sinceFlag(days)
 	d := &UserDashboard{User: u, Days: days, CommitsByYear: make(map[int]int)}
 
+	authorBase := []string{"--author=" + pat}
+	if since != "" {
+		authorBase = append(authorBase, since)
+	}
+
 	base := []string{"--all", "--author=" + pat}
 	if since != "" {
 		base = append(base, since)
@@ -84,24 +91,25 @@ func UserDashboardStats(u BranchUser, days int) (*UserDashboard, error) {
 		d.HasActivity = true
 	}
 
-	firstOut, err := runGit(append([]string{"log", "--no-merges", "-1", "--reverse", "--format=%aI"}, base...)...)
+	// git log -1 --reverse still applies -1 in default (newest-first) order, so both
+	// "first" and "last" queried that way were the same commit. Use rev-list traversal
+	// order instead: --reverse walks oldest→newest; default walks newest→oldest.
+	firstHash, err := firstRevListHash(true, authorBase)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(firstOut) != "" {
-		t, err := time.Parse(time.RFC3339, strings.TrimSpace(firstOut))
-		if err == nil {
+	if firstHash != "" {
+		if t, err := commitAuthorDateISO(firstHash); err == nil {
 			d.FirstCommit = t
 		}
 	}
 
-	lastOut, err := runGit(append([]string{"log", "--no-merges", "-1", "--format=%aI"}, base...)...)
+	lastHash, err := firstRevListHash(false, authorBase)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(lastOut) != "" {
-		t, err := time.Parse(time.RFC3339, strings.TrimSpace(lastOut))
-		if err == nil {
+	if lastHash != "" {
+		if t, err := commitAuthorDateISO(lastHash); err == nil {
 			d.LastCommit = t
 		}
 	}
@@ -151,6 +159,46 @@ func UserDashboardStats(u BranchUser, days int) (*UserDashboard, error) {
 	d.CommitsByYear = commitsByYearFromLog(yearOut)
 
 	return d, nil
+}
+
+// firstRevListHash returns one commit hash from git rev-list without buffering the full list.
+// With reverse=true, traversal is oldest→newest, so the first line is the oldest matching commit.
+// With reverse=false, traversal is newest→oldest, so the first line is the newest matching commit.
+// The child process is stopped after one line so large histories are not fully scanned into memory.
+func firstRevListHash(reverse bool, authorAndSince []string) (string, error) {
+	args := []string{"rev-list", "--no-merges"}
+	if reverse {
+		args = append(args, "--reverse")
+	}
+	args = append(args, "--all")
+	args = append(args, authorAndSince...)
+	cmd := exec.Command("git", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("git %v: %w", args, err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+
+	sc := bufio.NewScanner(stdout)
+	if !sc.Scan() {
+		_ = cmd.Wait()
+		return "", nil
+	}
+	hash := strings.TrimSpace(sc.Text())
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	return hash, nil
+}
+
+func commitAuthorDateISO(hash string) (time.Time, error) {
+	out, err := runGit("show", "-s", "--format=%aI", hash)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Parse(time.RFC3339, strings.TrimSpace(out))
 }
 
 func revListCount(args ...string) (int64, error) {
