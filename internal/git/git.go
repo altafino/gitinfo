@@ -3,10 +3,14 @@ package git
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // BranchUser represents a user who was active on a branch.
@@ -334,4 +338,169 @@ func parseCommitsLogOutput(out string) []CommitInfo {
 		})
 	}
 	return commits
+}
+
+// OpenInEditor attempts to open a file using the OS default associated application/app first.
+// If that fails (e.g., xdg-open not handling the file/mime), it falls back to a best-effort
+// default text editor for the platform (EDITOR/VISUAL or common editors).
+func OpenInEditor(path string) tea.Cmd {
+	// helpers kept local to avoid exporting
+	openWith := func(name string, args ...string) error {
+		cmd := exec.Command(name, append(args, path)...)
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
+	}
+
+	openWithShell := func(cmdline string) error {
+		cmd := exec.Command("sh", "-c", cmdline+" \""+path+"\"")
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("%s: %w", cmdline, err)
+		}
+		return nil
+	}
+
+	openWithTty := func(name string, args ...string) tea.Cmd {
+		c := exec.Command(name, append(args, path)...)
+		return tea.ExecProcess(c, func(err error) tea.Msg {
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			return nil
+		})
+	}
+
+	openWithShellTty := func(cmdline string) tea.Cmd {
+		c := exec.Command("sh", "-c", cmdline+" \""+path+"\"")
+		return tea.ExecProcess(c, func(err error) tea.Msg {
+			if err != nil {
+				return fmt.Errorf("%s: %w", cmdline, err)
+			}
+			return nil
+		})
+	}
+
+	isCLI := func(editor string) bool {
+		editor = strings.ToLower(editor)
+		cliEditors := []string{"vim", "nvim", "nano", "vi", "emacs", "micro"}
+		for _, e := range cliEditors {
+			if strings.Contains(editor, e) {
+				return true
+			}
+		}
+		return false
+	}
+
+	openEditorLinux := func() tea.Cmd {
+		// Try VISUAL/EDITOR first (can include args)
+		if v := strings.TrimSpace(os.Getenv("VISUAL")); v != "" {
+			if isCLI(v) {
+				return openWithShellTty(v)
+			}
+			if err := openWithShell(v); err == nil {
+				return func() tea.Msg { return nil }
+			}
+		}
+		if e := strings.TrimSpace(os.Getenv("EDITOR")); e != "" {
+			if isCLI(e) {
+				return openWithShellTty(e)
+			}
+			if err := openWithShell(e); err == nil {
+				return func() tea.Msg { return nil }
+			}
+		}
+
+		// Common GUI editors - try starting in background
+		guiCandidates := []string{"code", "codium", "gedit", "kate", "xed", "mousepad", "leafpad", "kwrite", "subl"}
+		for _, c := range guiCandidates {
+			if err := openWith(c); err == nil {
+				return func() tea.Msg { return nil }
+			}
+		}
+
+		// Common CLI editors - must use TTY
+		cliCandidates := []string{"nvim", "vim", "nano", "vi"}
+		for _, c := range cliCandidates {
+			// Check if candidate exists on PATH before trying to ExecProcess
+			if _, err := exec.LookPath(c); err == nil {
+				return openWithTty(c)
+			}
+		}
+
+		return func() tea.Msg {
+			return fmt.Errorf("no editor found (tried $VISUAL/$EDITOR and common editors like gedit, vim, nano)")
+		}
+	}
+
+	openEditorDarwin := func() tea.Cmd {
+		return func() tea.Msg {
+			// Fallback to TextEdit
+			if err := openWith("open", "-a", "TextEdit"); err == nil {
+				return nil
+			}
+			return fmt.Errorf("no editor found (tried open -a TextEdit)")
+		}
+	}
+
+	openEditorWindows := func() tea.Cmd {
+		return func() tea.Msg {
+			// Fallback to Notepad
+			if err := openWith("notepad"); err == nil {
+				return nil
+			}
+			return fmt.Errorf("no editor found (tried notepad)")
+		}
+	}
+
+	// First try OS default app in background
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		cmd = exec.Command("cmd", "/C", "start", "", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+
+	if err := cmd.Start(); err == nil {
+		// It started, we can return nil message
+		return func() tea.Msg { return nil }
+	}
+
+	// Fallback to platform-specific editor logic
+	switch runtime.GOOS {
+	case "darwin":
+		return openEditorDarwin()
+	case "windows":
+		return openEditorWindows()
+	default:
+		return openEditorLinux()
+	}
+}
+
+// OpenRevisionInEditor opens a specific revision of a file in the editor using a temporary file.
+func OpenRevisionInEditor(hash, path string) tea.Cmd {
+	return func() tea.Msg {
+		content, err := runGit("show", fmt.Sprintf("%s:%s", hash, path))
+		if err != nil {
+			return err
+		}
+
+		// Create a temp file with a name that suggests its origin
+		safePath := strings.ReplaceAll(path, string(os.PathSeparator), "_")
+		tmpFile, err := os.CreateTemp("", fmt.Sprintf("gitinfo-%s-%s-*", hash[:7], safePath))
+		if err != nil {
+			return err
+		}
+		defer tmpFile.Close()
+
+		if _, err := tmpFile.WriteString(content); err != nil {
+			return err
+		}
+
+		// Open the temp file using the existing logic
+		return OpenInEditor(tmpFile.Name())()
+	}
 }
