@@ -54,6 +54,7 @@ Put the binary on your `PATH` (for `go install`, `$GOPATH/bin` or `$(go env GOPA
 | :--- | :--- |
 | **↑** **↓** (also **k** / **j** on some screens) | Move the highlight or scroll |
 | **Enter** | Choose a menu item, confirm user, submit a form, or open commit details for the highlighted file |
+| **e** | In the User Files list, open the highlighted file in your OS default editor/app |
 | **/** | Filter the user list (user branches, user files, user dashboard) |
 | **Tab** | Next field on forms |
 | **Esc** or **q** | Go back one level; on the main menu, **q** exits the app. From the **User dashboard** screen, **Esc** returns to the day filter; **q** jumps to the main menu. |
@@ -81,7 +82,7 @@ Matching is case-insensitive and substring-based on name or e-mail.
 1. Choose **User Files**.  
 2. Select a user (**/** to filter).  
 3. Optionally set **branch** (empty = all branches) and **last N days** (empty = all time).  
-4. Use **↑** **↓** to move the cursor over files; **Enter** loads **commit history** for that file and user (respecting the same branch and day filters).  
+4. Use **↑** **↓** to move the cursor over files; **Enter** loads **commit history** for that file and user (respecting the same branch and day filters); press **e** to open the file in your OS default editor/app.  
 5. In the history view, **↑** **↓** scrolls long output; **Esc** or **q** returns to the file list.
 
 ### User dashboard

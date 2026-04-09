@@ -91,6 +91,7 @@ const (
 	viewUserDashboardUserSelect
 	viewUserDashboardInput
 	viewUserDashboard
+	viewCommitSelect
 )
 
 // ─── Menu item ───────────────────────────────────────────────────────────────
@@ -110,6 +111,13 @@ type userBranchesMsg []string
 type userFilesMsg []git.FileChange
 type fileCommitsMsg []git.CommitInfo
 type userDashboardMsg struct{ data *git.UserDashboard }
+
+type dashboardLineInfo struct {
+	file   string
+	hash   string
+	isItem bool
+}
+
 type gitUsersMsg []git.BranchUser
 type errMsg struct{ err error }
 
@@ -210,15 +218,23 @@ type Model struct {
 	ufScroll int
 	ufCursor int
 
+	// commit selection for "e"
+	csCommits []git.CommitInfo
+	csCursor  int
+	csScroll  int
+
 	// file-commits view
 	fcCommits    []git.CommitInfo
 	fcScroll     int
+	fcCursor     int
 	selectedFile string
 
 	// user dashboard
-	udForm   inputForm
-	udData   *git.UserDashboard
-	udScroll int
+	udForm    inputForm
+	udData    *git.UserDashboard
+	udScroll  int
+	udCursor  int
+	udLineMap []dashboardLineInfo
 
 	// user selection (shared by user-branches, user-files, user-dashboard flows)
 	pendingView  viewID
@@ -329,6 +345,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.view = viewUserFiles
 				return m, nil
 			}
+			if m.view == viewCommitSelect {
+				m.view = viewUserFiles
+				return m, nil
+			}
 			if m.view == viewUserDashboard {
 				m.view = viewMenu
 				m.err = nil
@@ -347,6 +367,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = nil
 				return m, nil
 			case viewFileCommits:
+				m.view = viewUserFiles
+				return m, nil
+			case viewCommitSelect:
 				m.view = viewUserFiles
 				return m, nil
 			case viewUserBranchesInput:
@@ -380,8 +403,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleFileSelect()
 			case viewUserDashboardInput:
 				return m.submitUserDashboardForm()
+			case viewUserDashboard:
+				return m.handleDashboardSelect()
 			case viewBranchUsers:
 				return m.handleBranchUserOpenDashboard()
+			case viewFileCommits:
+				return m.handleFileCommitSelect()
+			case viewCommitSelect:
+				return m.handleCommitSelect()
+			}
+
+		case "e":
+			if m.view == viewUserFiles {
+				return m.handleFileOpenEditor()
+			}
+			if m.view == viewFileCommits {
+				return m.handleFileCommitSelect()
+			}
+			if m.view == viewCommitSelect {
+				return m.handleCommitSelect()
+			}
+			if m.view == viewUserDashboard {
+				return m.handleDashboardOpenEditor()
 			}
 
 		case "tab":
@@ -415,13 +458,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case viewFileCommits:
-				if m.fcScroll > 0 {
-					m.fcScroll--
+				if m.fcCursor > 0 {
+					m.fcCursor--
+					m.syncFileCommitsScroll()
+				}
+				return m, nil
+			case viewCommitSelect:
+				if m.csCursor > 0 {
+					m.csCursor--
+					m.syncCommitSelectScroll()
 				}
 				return m, nil
 			case viewUserDashboard:
-				if m.udScroll > 0 {
-					m.udScroll--
+				if m.udCursor > 0 {
+					m.udCursor--
+					m.syncUserDashboardScroll()
 				}
 				return m, nil
 			}
@@ -443,10 +494,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case viewFileCommits:
-				m.fcScroll++
+				if m.fcCursor < len(m.fcCommits)-1 {
+					m.fcCursor++
+					m.syncFileCommitsScroll()
+				}
+				return m, nil
+			case viewCommitSelect:
+				if m.csCursor < len(m.csCommits)-1 {
+					m.csCursor++
+					m.syncCommitSelectScroll()
+				}
 				return m, nil
 			case viewUserDashboard:
-				m.udScroll++
+				if m.udCursor < len(m.udLineMap)-1 {
+					m.udCursor++
+					m.syncUserDashboardScroll()
+				}
 				return m, nil
 			}
 		}
@@ -481,8 +544,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fileCommitsMsg:
 		m.loading = false
+		if m.view == viewCommitSelect {
+			m.csCommits = []git.CommitInfo(msg)
+			m.csScroll = 0
+			m.csCursor = 0
+			return m, nil
+		}
 		m.fcCommits = []git.CommitInfo(msg)
 		m.fcScroll = 0
+		m.fcCursor = 0
 		m.view = viewFileCommits
 		return m, nil
 
@@ -490,7 +560,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.udData = msg.data
 		m.udScroll = 0
+		m.udCursor = 0
 		m.view = viewUserDashboard
+		m.rebuildUserDashboardLineMap()
 		return m, nil
 
 	case gitUsersMsg:
@@ -517,6 +589,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.err = msg.err
+		return m, nil
+
+	case error:
+		m.loading = false
+		m.err = msg
 		return m, nil
 	}
 
@@ -656,6 +733,224 @@ func (m Model) handleFileSelect() (tea.Model, tea.Cmd) {
 	days := parseDays(m.ufForm.value(1))
 
 	return m, tea.Batch(m.spinner.Tick, loadFileCommits(user, file, branch, days))
+}
+
+func (m Model) handleFileOpenEditor() (tea.Model, tea.Cmd) {
+	if len(m.ufFiles) == 0 {
+		return m, nil
+	}
+	file := m.ufFiles[m.ufCursor].File
+	changes := m.ufFiles[m.ufCursor].Changes
+
+	if changes > 1 {
+		m.view = viewCommitSelect
+		m.selectedFile = file
+		m.loading = true
+		user := m.selectedUser.Name
+		branch := strings.TrimSpace(m.ufForm.value(0))
+		days := parseDays(m.ufForm.value(1))
+		return m, tea.Batch(m.spinner.Tick, loadFileCommits(user, file, branch, days))
+	}
+
+	return m, git.OpenInEditor(file)
+}
+
+func (m Model) handleCommitSelect() (tea.Model, tea.Cmd) {
+	if len(m.csCommits) == 0 {
+		return m, nil
+	}
+	commit := m.csCommits[m.csCursor]
+	return m, git.OpenRevisionInEditor(commit.Hash, m.selectedFile)
+}
+
+func (m Model) handleFileCommitSelect() (tea.Model, tea.Cmd) {
+	if len(m.fcCommits) == 0 {
+		return m, nil
+	}
+	commit := m.fcCommits[m.fcCursor]
+	return m, git.OpenRevisionInEditor(commit.Hash, m.selectedFile)
+}
+
+func (m Model) handleDashboardSelect() (tea.Model, tea.Cmd) {
+	if len(m.udLineMap) == 0 {
+		return m, nil
+	}
+	item := m.udLineMap[m.udCursor]
+	if !item.isItem {
+		return m, nil
+	}
+	if item.hash != "" {
+		return m, git.OpenRevisionInEditor(item.hash, item.file)
+	}
+	if item.file != "" {
+		// Similar to handleFileOpenEditor but for dashboard top files
+		// We need to find the file in udData.TopFiles to get the number of changes
+		var changes int
+		for _, tf := range m.udData.TopFiles {
+			if tf.File == item.file {
+				changes = int(tf.Changes)
+				break
+			}
+		}
+
+		if changes > 1 {
+			m.view = viewCommitSelect
+			m.selectedFile = item.file
+			m.loading = true
+			user := m.selectedUser.Name
+			days := m.udData.Days
+			return m, tea.Batch(m.spinner.Tick, loadFileCommits(user, item.file, "", days))
+		}
+		return m, git.OpenInEditor(item.file)
+	}
+	return m, nil
+}
+
+func (m Model) handleDashboardOpenEditor() (tea.Model, tea.Cmd) {
+	return m.handleDashboardSelect()
+}
+
+func (m *Model) syncUserDashboardScroll() {
+	maxLines := m.height - 8
+	if maxLines < 1 {
+		maxLines = 20
+	}
+	total := len(m.udLineMap)
+	if total <= maxLines {
+		m.udScroll = 0
+		return
+	}
+	if m.udCursor < m.udScroll {
+		m.udScroll = m.udCursor
+	}
+	if m.udCursor >= m.udScroll+maxLines {
+		m.udScroll = m.udCursor - maxLines + 1
+	}
+	if m.udScroll > total-maxLines {
+		m.udScroll = total - maxLines
+	}
+	if m.udScroll < 0 {
+		m.udScroll = 0
+	}
+}
+
+func (m *Model) rebuildUserDashboardLineMap() {
+	if m.udData == nil {
+		m.udLineMap = nil
+		return
+	}
+	var lineMap []dashboardLineInfo
+
+	// Summary section
+	lineMap = append(lineMap, dashboardLineInfo{}) // User name
+	lineMap = append(lineMap, dashboardLineInfo{}) // Time filter
+	lineMap = append(lineMap, dashboardLineInfo{}) // Empty
+	lineMap = append(lineMap, dashboardLineInfo{}) // Summary title
+	lineMap = append(lineMap, dashboardLineInfo{}) // Non-merge commits
+	lineMap = append(lineMap, dashboardLineInfo{}) // Merge commits
+	if m.udData.HasActivity && !m.udData.FirstCommit.IsZero() {
+		lineMap = append(lineMap, dashboardLineInfo{}) // First commit
+		lineMap = append(lineMap, dashboardLineInfo{}) // Last commit
+	}
+	lineMap = append(lineMap, dashboardLineInfo{}) // Empty
+	lineMap = append(lineMap, dashboardLineInfo{}) // Lines changed title
+	lineMap = append(lineMap, dashboardLineInfo{}) // Insertions/Deletions
+	lineMap = append(lineMap, dashboardLineInfo{}) // Empty
+
+	// Branches section
+	lineMap = append(lineMap, dashboardLineInfo{}) // Branches title
+	if m.udData.BranchTotal == 0 {
+		lineMap = append(lineMap, dashboardLineInfo{}) // (none)
+	} else {
+		lineMap = append(lineMap, dashboardLineInfo{}) // Total
+		for range m.udData.Branches {
+			lineMap = append(lineMap, dashboardLineInfo{}) // Branch name
+		}
+		if m.udData.BranchTotal > len(m.udData.Branches) {
+			lineMap = append(lineMap, dashboardLineInfo{}) // ...more
+		}
+	}
+	lineMap = append(lineMap, dashboardLineInfo{}) // Empty
+
+	// Top files section
+	lineMap = append(lineMap, dashboardLineInfo{}) // Top files title
+	if len(m.udData.TopFiles) == 0 {
+		lineMap = append(lineMap, dashboardLineInfo{}) // (none)
+	} else {
+		for _, fc := range m.udData.TopFiles {
+			lineMap = append(lineMap, dashboardLineInfo{file: fc.File, isItem: true})
+		}
+	}
+	lineMap = append(lineMap, dashboardLineInfo{}) // Empty
+
+	// Recent commits section
+	lineMap = append(lineMap, dashboardLineInfo{}) // Recent commits title
+	if len(m.udData.Recent) == 0 {
+		lineMap = append(lineMap, dashboardLineInfo{}) // (none)
+	} else {
+		for _, c := range m.udData.Recent {
+			// Find which file this commit belongs to is hard here,
+			// but git show <hash> can show the whole commit.
+			// Actually, OpenRevisionInEditor needs a path.
+			// If we don't have a path, we might need a different tool.
+			// But the prompt says "select file > commit > open file with e".
+			// In dashboard, we have Top files (files) and Recent commits (commits).
+			// If I select a recent commit, which file should I open?
+			// Usually the first file in the commit or the most changed one?
+			// Let's see if we can get the files for a commit.
+			lineMap = append(lineMap, dashboardLineInfo{hash: c.Hash, isItem: true})
+		}
+	}
+	lineMap = append(lineMap, dashboardLineInfo{}) // Empty
+
+	// Commits by year section
+	lineMap = append(lineMap, dashboardLineInfo{}) // Commits by year title
+	years := git.SortedYears(m.udData.CommitsByYear)
+	if len(years) == 0 {
+		lineMap = append(lineMap, dashboardLineInfo{}) // (none)
+	} else {
+		for range years {
+			lineMap = append(lineMap, dashboardLineInfo{}) // Year: Count
+		}
+	}
+
+	m.udLineMap = lineMap
+}
+
+func (m *Model) syncFileCommitsScroll() {
+	// Each commit entry in fileCommitsView has roughly 3 lines (info, subject, spacer)
+	// plus optional body lines. This is hard to sync exactly because of variable body size.
+	// But we can estimate based on cursor.
+	// Actually, the view logic for fileCommitsView already handles scrolling lines.
+	// If we want a cursor selection, we might need a more predictable scrolling.
+
+	// For now, let's keep fcScroll roughly aligned with the cursor.
+	// A simple approach: set scroll to a position where cursor is visible.
+	// Since lines are not 1:1 with commits, this is tricky.
+}
+
+func (m *Model) syncCommitSelectScroll() {
+	maxLines := m.height - 8
+	if maxLines < 1 {
+		maxLines = 20
+	}
+	total := len(m.csCommits)
+	if total <= maxLines {
+		m.csScroll = 0
+		return
+	}
+	if m.csCursor < m.csScroll {
+		m.csScroll = m.csCursor
+	}
+	if m.csCursor >= m.csScroll+maxLines {
+		m.csScroll = m.csCursor - maxLines + 1
+	}
+	if m.csScroll > total-maxLines {
+		m.csScroll = total - maxLines
+	}
+	if m.csScroll < 0 {
+		m.csScroll = 0
+	}
 }
 
 // parseDays parses a string as a positive integer; returns 0 on failure.
@@ -845,6 +1140,8 @@ func (m Model) View() string {
 		return m.userFilesView()
 	case viewFileCommits:
 		return m.fileCommitsView()
+	case viewCommitSelect:
+		return m.commitSelectView()
 	case viewUserDashboardUserSelect:
 		return m.userSelectView("User Dashboard")
 	case viewUserDashboardInput:
@@ -1068,7 +1365,7 @@ func (m Model) userFilesView() string {
 		}
 	}
 
-	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll  •  enter select  •  esc/q back"))
+	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll  •  enter select  •  e open editor  •  esc/q back"))
 	return b.String()
 }
 
@@ -1093,29 +1390,64 @@ func (m Model) fileCommitsView() string {
 		}
 
 		var lines []string
-		for _, c := range m.fcCommits {
+		for i, c := range m.fcCommits {
 			shortHash := c.Hash
 			if len(shortHash) > 7 {
 				shortHash = shortHash[:7]
 			}
-			lines = append(lines, hashStyle.Render(fmt.Sprintf("  %s  ", shortHash))+
+
+			cursor := "  "
+			if i == m.fcCursor {
+				cursor = "> "
+			}
+
+			lines = append(lines, cursor+hashStyle.Render(fmt.Sprintf("%s  ", shortHash))+
 				dateStyle.Render(c.Date)+
 				"  "+
 				userStyle.Render(c.Author))
-			lines = append(lines, "  "+subjectStyle.Render(c.Subject))
+
+			subject := c.Subject
+			if i == m.fcCursor {
+				subject = selectedStyle.Render(subject)
+			} else {
+				subject = subjectStyle.Render(subject)
+			}
+			lines = append(lines, "    "+subject)
+
 			if c.Body != "" {
 				bodyLines := strings.Split(c.Body, "\n")
 				for _, bl := range bodyLines {
 					bl = strings.TrimSpace(bl)
 					if bl != "" {
-						lines = append(lines, bodyStyle.Render(fmt.Sprintf("    %s", bl)))
+						lines = append(lines, bodyStyle.Render(fmt.Sprintf("      %s", bl)))
 					}
 				}
 			}
 			lines = append(lines, "") // spacer between commits
 		}
 
+		// Update fcScroll to keep fcCursor visible
+		// This is a simple estimation: find line index of fcCursor
+		cursorLine := 0
+		for i := 0; i < m.fcCursor; i++ {
+			cursorLine += 3 // info, subject, spacer
+			if m.fcCommits[i].Body != "" {
+				bodyLines := strings.Split(m.fcCommits[i].Body, "\n")
+				for _, bl := range bodyLines {
+					if strings.TrimSpace(bl) != "" {
+						cursorLine++
+					}
+				}
+			}
+		}
+
 		total := len(lines)
+		if cursorLine < m.fcScroll {
+			m.fcScroll = cursorLine
+		} else if cursorLine >= m.fcScroll+maxLines-2 { // -2 for subject and spacer
+			m.fcScroll = cursorLine - maxLines + 4
+		}
+
 		scroll := m.fcScroll
 		if scroll > total-maxLines {
 			scroll = total - maxLines
@@ -1141,7 +1473,67 @@ func (m Model) fileCommitsView() string {
 		}
 	}
 
-	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll  •  esc/q back to list"))
+	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll/select  •  enter/e open editor  •  esc/q back to list"))
+	return b.String()
+}
+
+func (m Model) commitSelectView() string {
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(titleStyle.Render("  Select Commit to Open"))
+	b.WriteString("\n")
+	b.WriteString(fileStyle.Render(fmt.Sprintf("  File: %s", m.selectedFile)))
+	b.WriteString("\n")
+	b.WriteString(subtitleStyle.Render("  Choose a version to open in your editor:"))
+	b.WriteString("\n\n")
+
+	if len(m.csCommits) == 0 {
+		b.WriteString(subtitleStyle.Render("  No commits found."))
+		b.WriteString("\n")
+	} else {
+		maxLines := m.height - 10
+		if maxLines < 1 {
+			maxLines = 10
+		}
+		total := len(m.csCommits)
+		scroll := m.csScroll
+		end := scroll + maxLines
+		if end > total {
+			end = total
+		}
+
+		for i := scroll; i < end; i++ {
+			c := m.csCommits[i]
+			cursor := "  "
+			style := normalStyle
+			if i == m.csCursor {
+				cursor = "> "
+				style = selectedStyle
+			}
+
+			shortHash := c.Hash
+			if len(shortHash) > 7 {
+				shortHash = shortHash[:7]
+			}
+
+			b.WriteString(cursor)
+			b.WriteString(hashStyle.Render(shortHash))
+			b.WriteString(" ")
+			b.WriteString(dateStyle.Render(c.Date))
+			b.WriteString(" ")
+			b.WriteString(style.Render(truncateRunes(c.Subject, m.width-25)))
+			b.WriteString("\n")
+		}
+
+		if total > maxLines {
+			b.WriteString(countStyle.Render(fmt.Sprintf(
+				"\n  showing %d-%d of %d commits", scroll+1, end, total,
+			)))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString(helpStyle.Render("\n  ↑/↓ navigate  •  enter/e open  •  esc/q back"))
 	return b.String()
 }
 
@@ -1170,8 +1562,8 @@ func (m Model) userDashboardView() string {
 		return b.String()
 	}
 
-	lines := buildUserDashboardLines(m.udData, m.width)
-	maxLines := m.height - 6
+	lines := buildUserDashboardLines(m.udData, m.width, m.udCursor)
+	maxLines := m.height - 8
 	if maxLines < 1 {
 		maxLines = 20
 	}
@@ -1200,78 +1592,139 @@ func (m Model) userDashboardView() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll  •  esc back to filter  •  q menu"))
+	b.WriteString(helpStyle.Render("\n  ↑/↓ scroll  •  enter/e open  •  esc back to filter  •  q menu"))
 	return b.String()
 }
 
-func buildUserDashboardLines(d *git.UserDashboard, width int) []string {
-	maxW := width - 4
+func buildUserDashboardLines(d *git.UserDashboard, width int, cursor int) []string {
+	maxW := width - 6
 	if maxW < 40 {
 		maxW = 40
 	}
 	var lines []string
-	lines = append(lines, userStyle.Render(fmt.Sprintf("  %s <%s>", d.User.Name, d.User.Email)))
+
+	renderLine := func(idx int, content string) string {
+		prefix := "  "
+		if idx == cursor {
+			prefix = "> "
+		}
+		return prefix + content
+	}
+
+	lineIdx := 0
+	lines = append(lines, renderLine(lineIdx, userStyle.Render(fmt.Sprintf("%s <%s>", d.User.Name, d.User.Email))))
+	lineIdx++
+
 	if d.Days > 0 {
-		lines = append(lines, countStyle.Render(fmt.Sprintf("  Time filter: last %d day(s)", d.Days)))
+		lines = append(lines, renderLine(lineIdx, countStyle.Render(fmt.Sprintf("Time filter: last %d day(s)", d.Days))))
 	} else {
-		lines = append(lines, countStyle.Render("  Time filter: all history"))
+		lines = append(lines, renderLine(lineIdx, countStyle.Render("Time filter: all history")))
 	}
-	lines = append(lines, "")
-	lines = append(lines, subtitleStyle.Render("  Summary"))
-	lines = append(lines, fmt.Sprintf("  Non-merge commits: %d", d.CommitsNonMerge))
-	lines = append(lines, fmt.Sprintf("  Merge commits:     %d", d.CommitsMerge))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, ""))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, subtitleStyle.Render("Summary")))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, fmt.Sprintf("Non-merge commits: %d", d.CommitsNonMerge)))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, fmt.Sprintf("Merge commits:     %d", d.CommitsMerge)))
+	lineIdx++
+
 	if d.HasActivity && !d.FirstCommit.IsZero() {
-		lines = append(lines, fmt.Sprintf("  First commit:      %s", d.FirstCommit.Format(time.RFC3339)))
-		lines = append(lines, fmt.Sprintf("  Last commit:       %s", d.LastCommit.Format(time.RFC3339)))
+		lines = append(lines, renderLine(lineIdx, fmt.Sprintf("First commit:      %s", d.FirstCommit.Format(time.RFC3339))))
+		lineIdx++
+		lines = append(lines, renderLine(lineIdx, fmt.Sprintf("Last commit:       %s", d.LastCommit.Format(time.RFC3339))))
+		lineIdx++
 	}
-	lines = append(lines, "")
-	lines = append(lines, subtitleStyle.Render("  Lines changed (non-merge diffs)"))
-	lines = append(lines, fmt.Sprintf("  Insertions: %+d  Deletions: %+d  Net: %+d",
-		d.Insertions, d.Deletions, d.Insertions-d.Deletions))
-	lines = append(lines, "")
-	lines = append(lines, subtitleStyle.Render("  Branches (local, touched)"))
+
+	lines = append(lines, renderLine(lineIdx, ""))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, subtitleStyle.Render("Lines changed (non-merge diffs)")))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, fmt.Sprintf("Insertions: %+d  Deletions: %+d  Net: %+d",
+		d.Insertions, d.Deletions, d.Insertions-d.Deletions)))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, ""))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, subtitleStyle.Render("Branches (local, touched)")))
+	lineIdx++
+
 	if d.BranchTotal == 0 {
-		lines = append(lines, countStyle.Render("  (none)"))
+		lines = append(lines, renderLine(lineIdx, countStyle.Render("(none)")))
+		lineIdx++
 	} else {
-		lines = append(lines, countStyle.Render(fmt.Sprintf("  Total: %d", d.BranchTotal)))
+		lines = append(lines, renderLine(lineIdx, countStyle.Render(fmt.Sprintf("Total: %d", d.BranchTotal))))
+		lineIdx++
 		for _, br := range d.Branches {
-			lines = append(lines, branchStyle.Render("  • "+truncateRunes(br, maxW-4)))
+			lines = append(lines, renderLine(lineIdx, branchStyle.Render("• "+truncateRunes(br, maxW-2))))
+			lineIdx++
 		}
 		if d.BranchTotal > len(d.Branches) {
-			lines = append(lines, countStyle.Render(fmt.Sprintf("  … +%d more", d.BranchTotal-len(d.Branches))))
+			lines = append(lines, renderLine(lineIdx, countStyle.Render(fmt.Sprintf("… +%d more", d.BranchTotal-len(d.Branches)))))
+			lineIdx++
 		}
 	}
-	lines = append(lines, "")
-	lines = append(lines, subtitleStyle.Render("  Top files (by commit count)"))
+
+	lines = append(lines, renderLine(lineIdx, ""))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, subtitleStyle.Render("Top files (by commit count)")))
+	lineIdx++
+
 	if len(d.TopFiles) == 0 {
-		lines = append(lines, countStyle.Render("  (none)"))
+		lines = append(lines, renderLine(lineIdx, countStyle.Render("(none)")))
+		lineIdx++
 	} else {
 		for _, fc := range d.TopFiles {
-			line := fmt.Sprintf("  %s  (%d)", fc.File, fc.Changes)
-			lines = append(lines, fileStyle.Render(truncateRunes(line, maxW)))
+			line := fmt.Sprintf("%s  (%d)", fc.File, fc.Changes)
+			lines = append(lines, renderLine(lineIdx, fileStyle.Render(truncateRunes(line, maxW))))
+			lineIdx++
 		}
 	}
-	lines = append(lines, "")
-	lines = append(lines, subtitleStyle.Render("  Recent commits"))
+
+	lines = append(lines, renderLine(lineIdx, ""))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, subtitleStyle.Render("Recent commits")))
+	lineIdx++
+
 	if len(d.Recent) == 0 {
-		lines = append(lines, countStyle.Render("  (none)"))
+		lines = append(lines, renderLine(lineIdx, countStyle.Render("(none)")))
+		lineIdx++
 	} else {
 		for _, c := range d.Recent {
-			subj := truncateRunes(c.Subject, maxW-28)
-			line := hashStyle.Render("  "+c.Hash) + "  " + dateStyle.Render(shortISO(c.DateISO)) + "  " + normalStyle.Render(subj)
-			lines = append(lines, line)
+			subj := truncateRunes(c.Subject, maxW-26)
+			line := hashStyle.Render(c.Hash) + "  " + dateStyle.Render(shortISO(c.DateISO)) + "  " + normalStyle.Render(subj)
+			lines = append(lines, renderLine(lineIdx, line))
+			lineIdx++
 		}
 	}
-	lines = append(lines, "")
-	lines = append(lines, subtitleStyle.Render("  Commits by year (non-merge)"))
+
+	lines = append(lines, renderLine(lineIdx, ""))
+	lineIdx++
+
+	lines = append(lines, renderLine(lineIdx, subtitleStyle.Render("Commits by year (non-merge)")))
+	lineIdx++
+
 	years := git.SortedYears(d.CommitsByYear)
 	if len(years) == 0 {
-		lines = append(lines, countStyle.Render("  (none)"))
+		lines = append(lines, renderLine(lineIdx, countStyle.Render("(none)")))
+		lineIdx++
 	} else {
 		for _, y := range years {
-			lines = append(lines, fmt.Sprintf("  %d: %d", y, d.CommitsByYear[y]))
+			lines = append(lines, renderLine(lineIdx, fmt.Sprintf("%d: %d", y, d.CommitsByYear[y])))
+			lineIdx++
 		}
 	}
+
 	return lines
 }
 
